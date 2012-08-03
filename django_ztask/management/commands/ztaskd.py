@@ -101,7 +101,7 @@ class Command(BaseCommand):
                 except Exception, e:
                     self.logger.info('Count not get task with id %s:\n%s' % (task_id, e))
                     return
-                
+
             self.logger.info('Calling %s' % function_name)
             #self.logger.info('Task ID: %s' % task_id)
             try:
