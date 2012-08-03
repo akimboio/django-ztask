@@ -20,7 +20,7 @@ import traceback
 import logging
 import pickle
 import datetime, time
- 
+
 class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
         make_option('--noreload', action='store_false', dest='use_reloader', default=True, help='Tells Django to NOT use the auto-reloader.'),
@@ -32,7 +32,7 @@ class Command(BaseCommand):
     help = 'Start the ztaskd server'
     func_cache = {}
     io_loop = None
-    
+
     def handle(self, *args, **options):
         self._setup_logger(options.get('logfile', None), options.get('loglevel', 'info'))
         use_reloader = options.get('use_reloader', True)
@@ -41,14 +41,14 @@ class Command(BaseCommand):
             autoreload.main(lambda: self._handle(use_reloader, replay_failed))
         else:
             self._handle(use_reloader, replay_failed)
-    
+
     def _handle(self, use_reloader, replay_failed):
         self.logger.info("%sServer starting on %s." % ('Development ' if use_reloader else '', settings.ZTASKD_URL))
         self._on_load()
-        
+
         socket = context.socket(PULL)
         socket.bind(settings.ZTASKD_URL)
-        
+
         def _queue_handler(socket, *args, **kwargs):
             try:
                 function_name, args, kwargs, after = socket.recv_pyobj()
@@ -56,9 +56,9 @@ class Command(BaseCommand):
                     self.logger.warn('%s: %s' % (args[0], args[1]))
                     return
                 task = Task.objects.create(
-                    function_name=function_name, 
-                    args=pickle.dumps(args), 
-                    kwargs=pickle.dumps(kwargs), 
+                    function_name=function_name,
+                    args=pickle.dumps(args),
+                    kwargs=pickle.dumps(kwargs),
                     retry_count=settings.ZTASKD_RETRY_COUNT,
                     next_attempt=time.time() + after
                 )
@@ -131,7 +131,7 @@ class Command(BaseCommand):
             except Exception, e2:
                 self.logger.error('Error capturing exception in _call_function. Details:\n%s' % e2)
             traceback.print_exc(e)
-    
+
     def _setup_logger(self, logfile, loglevel):
         LEVELS = {
             'debug': logging.DEBUG,
@@ -140,18 +140,18 @@ class Command(BaseCommand):
             'error': logging.ERROR,
             'critical': logging.CRITICAL
         }
-        
+
         self.logger = logging.getLogger('ztaskd')
         self.logger.setLevel(LEVELS[loglevel.lower()])
         if logfile:
             handler = logging.FileHandler(logfile, delay=True)
         else:
             handler = logging.StreamHandler()
-        
+
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
-        
+
     def _on_load(self):
         for callable_name in settings.ZTASKD_ON_LOAD:
             self.logger.info("ON_LOAD calling %s" % callable_name)
@@ -162,8 +162,3 @@ class Command(BaseCommand):
                 __import__(module_name)
             callable_fn = getattr(sys.modules[module_name], member_name)
             callable_fn()
-            
-    
-
-
-
