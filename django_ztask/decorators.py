@@ -43,7 +43,7 @@ def task():
 
         def _func_delay(*args, **kwargs):
             try:
-                socket.send_pyobj(('ztask_log', ('.delay is depricated... use.async instead', function_name), None, 0))
+                socket.send_pyobj(('ztask_log', ('.delay is deprecated... use.async instead', function_name), None, 0))
             except:
                 pass
             _func(*args, **kwargs)
