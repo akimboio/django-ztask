@@ -62,7 +62,7 @@ class Command(BaseCommand):
                     retry_count=settings.ZTASKD_RETRY_COUNT,
                     next_attempt=time.time() + after
                 )
-                
+
                 if after:
                     ioloop.DelayedCallback(lambda: self._call_function(task.pk, function_name=function_name, args=args, kwargs=kwargs), after * 1000, io_loop=self.io_loop).start()
                 else:
@@ -70,7 +70,7 @@ class Command(BaseCommand):
             except Exception, e:
                 self.logger.error('Error setting up function. Details:\n%s' % e)
                 traceback.print_exc(e)
-        
+
         # Reload tasks if necessary
         if replay_failed:
             replay_tasks = Task.objects.all().order_by('created')
@@ -82,14 +82,14 @@ class Command(BaseCommand):
             else:
                 after = task.next_attempt - time.time()
                 ioloop.DelayedCallback(lambda: self._call_function(task.pk), after * 1000, io_loop=self.io_loop).start()
-        
+
         self.io_loop = ioloop.IOLoop.instance()
         self.io_loop.add_handler(socket, _queue_handler, self.io_loop.READ)
         self.io_loop.start()
-    
+
     def p(self, txt):
         print txt
-    
+
     def _call_function(self, task_id, function_name=None, args=None, kwargs=None):
         try:
             if not function_name:
