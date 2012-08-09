@@ -147,7 +147,7 @@ class Command(BaseCommand):
             self.job_distribution_socket.send(job)
 
         def _handle_job_completion_status(socket, *args, **kwargs):
-            self.logger.info("Job status: {0".format(self.job_status_report_collector.recv()))
+            self.logger.info("Job status: {0}".format(self.job_status_report_collector.recv()))
 
         self.io_loop = ioloop.IOLoop.instance()
         self.io_loop.add_handler(receiver, _queue_handler, self.io_loop.READ)
