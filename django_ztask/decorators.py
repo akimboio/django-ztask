@@ -1,11 +1,20 @@
-from django.utils.decorators import available_attrs
 from functools import wraps
+from django.conf import settings
 
 import logging
-import types
 
 def task():
-    from django_ztask.conf import settings
+    def build_job_distribution_socket():
+        """
+        Set up a push connection to all of the worker nodes
+        so we can send jobs.
+        """
+        from django_ztask.context import shared_context as context
+        socket = context.socket(PUSH)
+        for worker_url in settings.ZTASKD_WORKER_URL_LIST:
+            socket.connect(worker_url)
+
+        return socket
     try:
         from zmq import PUSH
     except:
@@ -16,9 +25,8 @@ def task():
         logger = logging.getLogger('ztaskd')
         logger.info('Registered task: %s' % function_name)
         
-        from django_ztask.context import shared_context as context
-        socket = context.socket(PUSH)
-        socket.connect(settings.ZTASKD_URL)
+        socket = build_job_distribution_socket()
+
         @wraps(func)
         def _func(*args, **kwargs):
             after = kwargs.pop('__ztask_after', 0)
@@ -41,26 +49,8 @@ def task():
                         logger.info('Ignoring timeout of %s seconds because function is being run in-process' % after)
                     func(*args, **kwargs)
 
-        def _func_delay(*args, **kwargs):
-            try:
-                socket.send_pyobj(('ztask_log', ('.delay is deprecated... use.async instead', function_name), None, 0))
-            except:
-                pass
-            _func(*args, **kwargs)
-            
-        def _func_after(*args, **kwargs):
-            try:
-                after = args[0]
-                if type(after) != types.IntType:
-                    raise TypeError('The first argument of .after must be an integer representing seconds to wait')
-                kwargs['__ztask_after'] = after
-                _func(*args[1:], **kwargs)
-            except Exception, e:
-                logger.info('Error adding delayed task:\n%s' % e)
-        
         setattr(func, 'async', _func)
-        setattr(func, 'delay', _func_delay)
-        setattr(func, 'after', _func_after)
+
         return func
     
     return wrapper
