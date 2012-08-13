@@ -30,6 +30,10 @@ class Command(BaseCommand):
     io_loop = None
 
     def handle(self, *args, **options):
+        """
+        Base handler needed by a django management command.  Gets the ball
+        rolling.
+        """
         self._setup_logger(options.get('logfile', None), options.get('loglevel', 'info'))
 
         if options["multiprocess"]:
@@ -50,7 +54,13 @@ class Command(BaseCommand):
 
         handler()
 
+    # The following functions are used by the program in multiprocess mode.
     def _setup_multiprocess_signal_handling(self):
+        """
+        Used in multiprocess mode.
+
+        Set up signal handling for the parent process.
+        """
         def keyboard_interrupt_handler(signum, frame):
             self.logger.info("Terminating children...")
 
@@ -61,6 +71,11 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, keyboard_interrupt_handler)
 
     def _setup_subprocess_signal_handling(self):
+        """
+        Used in multiprocess mode.
+
+        Set up signal handling for the child prorcess.
+        """
         def keyboard_interrupt_handler(signum, frame):
             self.logger.info("Child is terminating")
 
@@ -71,12 +86,18 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, keyboard_interrupt_handler)
 
     def _kill_worker_pool(self):
+        """
+        Kill a pool of worker subprocesses.
+        """
         for p in self.worker_pool:
             p.terminate()
 
         self.worker_pool = []
 
     def _spawn_worker_pool(self):
+        """
+        Spawn a pool of worker subprocesses.
+        """
 
         def multiprocess_worker(worker_id):
             self._setup_subprocess_signal_handling()
@@ -129,6 +150,10 @@ class Command(BaseCommand):
 
     def _multiprocess_handler(self):
         """
+        Worker function for the parent process.
+
+        Spawns a pool of worker subprocesses and
+        begins receiving and forwarding worker jobs.
         """
         self.context = zmq.Context()
 
@@ -155,7 +180,12 @@ class Command(BaseCommand):
                 self.io_loop.READ)
         self.io_loop.start()
 
+    # Code for handling single process mode
     def _handler(self):
+        """
+        Single process worker function.  Receives and executes
+        (serially) all jobs.
+        """
         self.logger.info("%sServer starting on %s." % ('Development ', settings.ZTASKD_WORKER_BIND_URL))
         self._on_load()
 
@@ -180,6 +210,8 @@ class Command(BaseCommand):
         self.io_loop.add_handler(socket, _queue_handler, self.io_loop.READ)
         self.io_loop.start()
 
+    # Following are functions that are common to single-process and
+    # multiprocess mode.
     def p(self, txt):
         print txt
 
@@ -203,7 +235,8 @@ class Command(BaseCommand):
 
     def _exec_job(self, job_tuple, io_loop):
         """
-        Execute a job.
+        Execute a job.  job_tuple is a tuple of the sort returned
+        by _pull_job_from_queue.
         """
         (function_name, args, kwargs, after) = job_tuple
 
@@ -217,6 +250,10 @@ class Command(BaseCommand):
             return None
 
     def _call_function(self, io_loop, function_name, args=None, kwargs=None):
+        """
+        Load and call a function with the provided name and arguments,
+        then return the results.
+        """
         function_result = None
 
         try:
