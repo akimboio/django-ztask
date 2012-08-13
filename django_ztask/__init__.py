@@ -1,7 +1,7 @@
 """Django ZTask."""
 import os
 
-VERSION = (0, 1, 6, 1)
+VERSION = (0, 1, 7)
 
 __version__ = ".".join(map(str, VERSION[0:3])) + "".join(VERSION[3:])
 __author__ = "Jason Allum and Dave Martorana"
