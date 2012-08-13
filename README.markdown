@@ -1,6 +1,42 @@
 IMPORTANT: READ ME
 ==================
 
+News for 0.1.6 (akimbo fork)
+===========================
+
+In version 0.1.6 (akimbo fork), much as changed.
+
+Additions
+=========
+
+1. multiprocessing support has been added.
+
+   Use of the --multiprocess and --worker-pool-size options cause ztaskd to spawn
+   multiple worker subprocesses which actually perform the zmq jobs.  This allows
+   long running jobs to be performed in parallel instead of serially.
+
+2. decorators now have a 'fan-out' option for distributing jobs.
+
+   The akimbo use case for ztaskd called for being able to distribute jobs to multiple
+   worker nodes.  The decorator now connects to all known worker nodes and pushes jobs
+   (in a round-robin fashion) to worker nodes to be executed.  Each worker node
+   can be running ztaskd (in single or multiprocess mode).
+
+
+Warning
+=======
+
+1. Replay and reload have been temporarily removed
+
+   ztaskd previously had options for storing and reprocessing jobs
+   that failed to execute.  Similarly, there was support for automatically
+   reloading in case src files had changed.  We do not currently need this
+   functionality in our case, so it was removed to simplify the code.  It will
+   be readded back in in the very near future.
+
+News for 0.1.4
+==============
+
 In version 0.1.4, we are introducing two major changes:
 
 1. Tasks now have a `created` datetime field. This was added to make sure `--replayfailed` replayed tasks in the appropriate order
