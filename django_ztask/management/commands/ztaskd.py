@@ -1,109 +1,262 @@
 from django.core.management.base import BaseCommand
-from django.utils import autoreload
-#
-from django_ztask.models import *
 #
 from django_ztask.conf import settings
-from django_ztask.context import shared_context as context
 #
 import zmq
 from zmq.eventloop import ioloop
 try:
-    from zmq import PULL
+    from zmq import PULL, PUSH
 except:
-    from zmq import UPSTREAM as PULL
+    from zmq import UPSTREAM as PULL, PUSH
 #
 from optparse import make_option
 import sys
 import traceback
 
 import logging
-import pickle
-import datetime, time
- 
+from multiprocessing import Process
+import signal
+
 class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
-        make_option('--noreload', action='store_false', dest='use_reloader', default=True, help='Tells Django to NOT use the auto-reloader.'),
         make_option('-f', '--logfile', action='store', dest='logfile', default=None, help='Tells ztaskd where to log information. Leaving this blank logs to stderr'),
         make_option('-l', '--loglevel', action='store', dest='loglevel', default='info', help='Tells ztaskd what level of information to log'),
-        make_option('--replayfailed', action='store_true', dest='replay_failed', default=False, help='Replays all failed calls in the db'),
+        make_option('--multiprocess', action='store_true', default=False, help='Run ztaskd with multiprocess support'),
+        make_option('--worker-pool-size', action='store', default=8, type='int', help='Number of workers in the subscriber worker pool'),
     )
     args = ''
     help = 'Start the ztaskd server'
     func_cache = {}
     io_loop = None
-    
+
     def handle(self, *args, **options):
+        """
+        Base handler needed by a django management command.  Gets the ball
+        rolling.
+        """
         self._setup_logger(options.get('logfile', None), options.get('loglevel', 'info'))
-        use_reloader = options.get('use_reloader', True)
-        replay_failed = options.get('replay_failed', False)
-        if use_reloader:
-            autoreload.main(lambda: self._handle(use_reloader, replay_failed))
-        else:
-            self._handle(use_reloader, replay_failed)
-    
-    def _handle(self, use_reloader, replay_failed):
-        self.logger.info("%sServer starting on %s." % ('Development ' if use_reloader else '', settings.ZTASKD_URL))
-        self._on_load()
-        
-        socket = context.socket(PULL)
-        socket.bind(settings.ZTASKD_URL)
-        
-        def _queue_handler(socket, *args, **kwargs):
-            try:
-                function_name, args, kwargs, after = socket.recv_pyobj()
-                if function_name == 'ztask_log':
-                    self.logger.warn('%s: %s' % (args[0], args[1]))
-                    return
-                task = Task.objects.create(
-                    function_name=function_name, 
-                    args=pickle.dumps(args), 
-                    kwargs=pickle.dumps(kwargs), 
-                    retry_count=settings.ZTASKD_RETRY_COUNT,
-                    next_attempt=time.time() + after
-                )
-                
-                if after:
-                    ioloop.DelayedCallback(lambda: self._call_function(task.pk, function_name=function_name, args=args, kwargs=kwargs), after * 1000, io_loop=self.io_loop).start()
-                else:
-                    self._call_function(task.pk, function_name=function_name, args=args, kwargs=kwargs)
-            except Exception, e:
-                self.logger.error('Error setting up function. Details:\n%s' % e)
-                traceback.print_exc(e)
-        
-        # Reload tasks if necessary
-        if replay_failed:
-            replay_tasks = Task.objects.all().order_by('created')
-        else:
-            replay_tasks = Task.objects.filter(retry_count__gt=0).order_by('created')
-        for task in replay_tasks:
-            if task.next_attempt < time.time():
-                ioloop.DelayedCallback(lambda: self._call_function(task.pk), 5000, io_loop=self.io_loop).start()
+
+        if options["multiprocess"]:
+            if options["worker_pool_size"]:
+                self.worker_pool_size = options["worker_pool_size"]
             else:
-                after = task.next_attempt - time.time()
-                ioloop.DelayedCallback(lambda: self._call_function(task.pk), after * 1000, io_loop=self.io_loop).start()
-        
+                self.worker_pool_size = settings.ZTASKD_WORKER_POOL_SIZE
+
+            handler = self._multiprocess_handler
+
+            self.worker_pool = []
+
+            self._kill_worker_pool()
+
+            self._setup_multiprocess_signal_handling()
+        else:
+            handler = self._handler
+
+        handler()
+
+    # The following functions are used by the program in multiprocess mode.
+    def _setup_multiprocess_signal_handling(self):
+        """
+        Used in multiprocess mode.
+
+        Set up signal handling for the parent process.
+        """
+        def keyboard_interrupt_handler(signum, frame):
+            self.logger.info("Terminating children...")
+
+            self._kill_worker_pool()
+
+            sys.exit()
+
+        signal.signal(signal.SIGINT, keyboard_interrupt_handler)
+
+    def _setup_subprocess_signal_handling(self):
+        """
+        Used in multiprocess mode.
+
+        Set up signal handling for the child prorcess.
+        """
+        def keyboard_interrupt_handler(signum, frame):
+            self.logger.info("Child is terminating")
+
+            self.io_loop.close(all_fds=True)
+
+            sys.exit()
+
+        signal.signal(signal.SIGINT, keyboard_interrupt_handler)
+
+    def _kill_worker_pool(self):
+        """
+        Kill a pool of worker subprocesses.
+        """
+        for p in self.worker_pool:
+            p.terminate()
+
+        self.worker_pool = []
+
+    def _spawn_worker_pool(self):
+        """
+        Spawn a pool of worker subprocesses.
+        """
+
+        def multiprocess_worker(worker_id):
+            self._setup_subprocess_signal_handling()
+
+            # Note: forked processes need their own zmq contexts
+            self.context = zmq.Context()
+
+            job_receiver = self.context.socket(PULL)
+            job_receiver.connect(
+                settings.ZTASKD_SUBWORKER_MANAGEMENT_URL)
+
+            job_status_report_sender = self.context.socket(PUSH)
+            job_status_report_sender.connect(
+                    settings.ZTASKD_SUBWORKER_STATUS_REPORT_URL)
+
+            self.io_loop = ioloop.IOLoop.instance()
+
+            def _queue_handler(socket, *args, **kwargs):
+                job_tuple = self._pull_job_from_queue(job_receiver)
+
+                if job_tuple:
+                    result = self._exec_job(job_tuple, self.io_loop)
+
+                    if None != result:
+                        job_status_report_sender.send("DONE:{0}".format(result))
+                    else:
+                        job_status_report_sender.send("Failed")
+
+            self.io_loop.add_handler(job_receiver, _queue_handler,
+                self.io_loop.READ)
+            self.io_loop.start()
+
+        self.worker_pool = []
+
+        self.job_distribution_socket = self.context.socket(PUSH)
+        self.job_distribution_socket.bind(
+            settings.ZTASKD_SUBWORKER_MANAGEMENT_URL)
+
+        for i in range(self.worker_pool_size):
+            p = Process(target = multiprocess_worker,
+                        args = (i,))
+
+            p.start()
+
+            self.worker_pool.append(p)
+
+        self.job_status_report_collector = self.context.socket(PULL)
+        self.job_status_report_collector.bind(settings.ZTASKD_SUBWORKER_STATUS_REPORT_URL)
+
+
+    def _multiprocess_handler(self):
+        """
+        Worker function for the parent process.
+
+        Spawns a pool of worker subprocesses and
+        begins receiving and forwarding worker jobs.
+        """
+        self.context = zmq.Context()
+
+        self.logger.info("%sServer starting on %s." % ('Development ', settings.ZTASKD_WORKER_BIND_URL))
+        self._on_load()
+
+        self.logger.info("Spawning worker pool of size {0}".format(self.worker_pool_size))
+        self._spawn_worker_pool()
+
+        receiver = self.context.socket(PULL)
+        receiver.bind(settings.ZTASKD_WORKER_BIND_URL)
+
+        def _queue_handler(socket, *args, **kwargs):
+            job = receiver.recv()
+
+            self.job_distribution_socket.send(job)
+
+        def _handle_job_completion_status(socket, *args, **kwargs):
+            self.logger.info("Job status: {0}".format(self.job_status_report_collector.recv()))
+
+        self.io_loop = ioloop.IOLoop.instance()
+        self.io_loop.add_handler(receiver, _queue_handler, self.io_loop.READ)
+        self.io_loop.add_handler(self.job_status_report_collector, _handle_job_completion_status,
+                self.io_loop.READ)
+        self.io_loop.start()
+
+    # Code for handling single process mode
+    def _handler(self):
+        """
+        Single process worker function.  Receives and executes
+        (serially) all jobs.
+        """
+        self.logger.info("%sServer starting on %s." % ('Development ', settings.ZTASKD_WORKER_BIND_URL))
+        self._on_load()
+
+        self.context = zmq.Context()
+
+        socket = self.context.socket(PULL)
+
+        socket.bind(settings.ZTASKD_WORKER_BIND_URL)
+
+        self.logger.info("binding to '{0}'".format(settings.ZTASKD_WORKER_BIND_URL))
+
+        def _queue_handler(socket, *args, **kwargs):
+            self.logger.info("Pulling job")
+            job_tuple = self._pull_job_from_queue(socket)
+
+            if job_tuple:
+                self._exec_job(job_tuple, self.io_loop)
+                self.logger.info("Job complete")
+
+        self.logger.info("running")
         self.io_loop = ioloop.IOLoop.instance()
         self.io_loop.add_handler(socket, _queue_handler, self.io_loop.READ)
         self.io_loop.start()
-    
+
+    # Following are functions that are common to single-process and
+    # multiprocess mode.
     def p(self, txt):
         print txt
-    
-    def _call_function(self, task_id, function_name=None, args=None, kwargs=None):
+
+    def _pull_job_from_queue(self, socket):
+        """
+        Pull a job from the socket and return a tuple with all
+        we know about it.
+        """
         try:
-            if not function_name:
-                try:
-                    task = Task.objects.get(pk=task_id)
-                    function_name = task.function_name
-                    args = pickle.loads(str(task.args))
-                    kwargs = pickle.loads(str(task.kwargs))
-                except Exception, e:
-                    self.logger.info('Count not get task with id %s:\n%s' % (task_id, e))
-                    return
-                
-            self.logger.info('Calling %s' % function_name)
-            #self.logger.info('Task ID: %s' % task_id)
+            function_name, args, kwargs, after = socket.recv_pyobj()
+            if function_name == 'ztask_log':
+                self.logger.warn('%s: %s' % (args[0], args[1]))
+                return None
+
+            return (function_name, args, kwargs, after)
+        except Exception, e:
+            self.logger.error('Error setting up function. Details:\n%s' % e)
+            traceback.print_exc(e)
+
+            return None
+
+    def _exec_job(self, job_tuple, io_loop):
+        """
+        Execute a job.  job_tuple is a tuple of the sort returned
+        by _pull_job_from_queue.
+        """
+        (function_name, args, kwargs, after) = job_tuple
+
+        try:
+            return self._call_function(io_loop,
+                function_name=function_name, args=args, kwargs=kwargs)
+        except Exception, e:
+            self.logger.error('Error setting up function. Details:\n%s' % e)
+            traceback.print_exc(e)
+
+            return None
+
+    def _call_function(self, io_loop, function_name, args=None, kwargs=None):
+        """
+        Load and call a function with the provided name and arguments,
+        then return the results.
+        """
+        function_result = None
+
+        try:
             try:
                 function = self.func_cache[function_name]
             except KeyError:
@@ -114,24 +267,12 @@ class Command(BaseCommand):
                     __import__(module_name)
                 function = getattr(sys.modules[module_name], member_name)
                 self.func_cache[function_name] = function
-            function(*args, **kwargs)
-            self.logger.info('Called %s successfully' % function_name)
-            Task.objects.get(pk=task_id).delete()
+            function_result = function(*args, **kwargs)
         except Exception, e:
-            self.logger.error('Error calling %s. Details:\n%s' % (function_name, e))
-            try:
-                task = Task.objects.get(pk=task_id)
-                if task.retry_count > 0:
-                    task.retry_count = task.retry_count - 1
-                    task.next_attempt = time.time() + settings.ZTASKD_RETRY_AFTER
-                    ioloop.DelayedCallback(lambda: self._call_function(task.pk), settings.ZTASKD_RETRY_AFTER * 1000, io_loop=self.io_loop).start()
-                task.failed = datetime.datetime.utcnow()
-                task.last_exception = '%s' % e
-                task.save()
-            except Exception, e2:
-                self.logger.error('Error capturing exception in _call_function. Details:\n%s' % e2)
             traceback.print_exc(e)
-    
+
+        return function_result
+
     def _setup_logger(self, logfile, loglevel):
         LEVELS = {
             'debug': logging.DEBUG,
@@ -140,18 +281,18 @@ class Command(BaseCommand):
             'error': logging.ERROR,
             'critical': logging.CRITICAL
         }
-        
+
         self.logger = logging.getLogger('ztaskd')
         self.logger.setLevel(LEVELS[loglevel.lower()])
         if logfile:
             handler = logging.FileHandler(logfile, delay=True)
         else:
             handler = logging.StreamHandler()
-        
+
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
-        
+
     def _on_load(self):
         for callable_name in settings.ZTASKD_ON_LOAD:
             self.logger.info("ON_LOAD calling %s" % callable_name)
@@ -162,8 +303,3 @@ class Command(BaseCommand):
                 __import__(module_name)
             callable_fn = getattr(sys.modules[module_name], member_name)
             callable_fn()
-            
-    
-
-
-
