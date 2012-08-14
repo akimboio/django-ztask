@@ -24,11 +24,11 @@ def task():
         
         logger = logging.getLogger('ztaskd')
         logger.info('Registered task: %s' % function_name)
-        
-        socket = build_job_distribution_socket()
 
         @wraps(func)
         def _func(*args, **kwargs):
+            socket = build_job_distribution_socket()
+
             after = kwargs.pop('__ztask_after', 0)
             if settings.ZTASKD_DISABLED:
                 try:
