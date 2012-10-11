@@ -21,7 +21,7 @@ def task():
         from zmq import DOWNSTREAM as PUSH
     def wrapper(func):
         function_name = '%s.%s' % (func.__module__, func.__name__)
-        
+
         logger = logging.getLogger('ztaskd')
         logger.info('Registered task: %s' % function_name)
 
@@ -52,5 +52,5 @@ def task():
         setattr(func, 'async', _func)
 
         return func
-    
+
     return wrapper
