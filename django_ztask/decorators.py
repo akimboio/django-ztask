@@ -3,18 +3,26 @@ from django.conf import settings
 
 import logging
 
+
+__socket__ = None
+
+
 def task():
     def build_job_distribution_socket():
         """
         Set up a push connection to all of the worker nodes
         so we can send jobs.
         """
-        from django_ztask.context import shared_context as context
-        socket = context.socket(PUSH)
-        for worker_url in settings.ZTASKD_WORKER_URL_LIST:
-            socket.connect(worker_url)
+        global __socket__
 
-        return socket
+        if not __socket__:
+            from django_ztask.context import shared_context as context
+            __socket__ = context.socket(PUSH)
+            for worker_url in settings.ZTASKD_WORKER_URL_LIST:
+                __socket__.connect(worker_url)
+
+        return __socket__
+
     try:
         from zmq import PUSH
     except:
