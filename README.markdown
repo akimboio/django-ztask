@@ -1,6 +1,25 @@
 IMPORTANT: READ ME
 ==================
 
+STATUS
+======
+
+I don't quite consider this fork ready for action yet; I've (temporarily) removed a few features from the
+original django-ztask while I became familiar with the codebase.
+
+I have a few things on my TODO list before I would consider the library ready for action:
+
+1) fix a bug with the task decorator which can quickly exhaust a processes file descriptors (fix in testing...)
+2) Re-add the features removed from the original project.
+3) Add a bunch of unit tests
+
+In other words, I recommend *NOT* using this fork for sometime.
+
+Check out the original: https://github.com/dmgctrl/django-ztask
+
+I will eventually send a pull request upstream.
+
+
 News for 0.1.6 (akimbo fork)
 ===========================
 
